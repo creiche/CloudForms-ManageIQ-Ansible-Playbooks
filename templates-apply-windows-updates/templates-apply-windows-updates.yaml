@@ -1,0 +1,193 @@
+---
+- hosts: all 
+  gather_facts: false
+
+  tasks:  
+  - name: Set ManageIQ API URL to get Templates with win_auto_update tag set to true.
+    set_fact:
+      template_url: "{{ manageiq.api_url }}/api/templates/?expand=resources,tags&by_tag=/win_auto_update/true&attributes=ext_management_system.hostname,ems_cluster_name,v_owning_datacenter,v_owning_blue_folder_path"
+    delegate_to: localhost
+
+  - name: Set ManageIQ API URL to get VMs with win_auto_update tag set to true.
+    set_fact:
+      vms_url: "{{ manageiq.api_url }}/api/vms/?expand=resources,tags&by_tag=/win_auto_update/true&attributes=ext_management_system.hostname,ems_cluster_name,v_owning_datacenter,v_owning_blue_folder_path"
+    delegate_to: localhost    
+
+  - name: Call MIQ API for Windows Templates
+    uri:
+      url: "{{ template_url }}"
+      method: GET
+      validate_certs: False
+      force_basic_auth: yes
+      status_code: 200
+      body_format: json
+      headers:
+        X-Auth-Token: "{{ manageiq.api_token }}"
+        Content-Type: "application/json"
+    delegate_to: localhost
+    register: templates
+
+  - name: Call MIQ API for Windows VMs
+    uri:
+      url: "{{ vms_url }}"
+      method: GET
+      validate_certs: False
+      force_basic_auth: yes
+      status_code: 200
+      body_format: json
+      headers:
+        X-Auth-Token: "{{ manageiq.api_token }}"
+        Content-Type: "application/json"
+    delegate_to: localhost
+    register: vms
+
+  - name: Combine VMs & Templates
+    set_fact: 
+      vms_and_templates: "{{ vms.json.resources }} + {{ templates.json.resources }}"
+
+  - name: Convert to VM
+    vmware_guest:
+      hostname: "{{ item.ext_management_system.hostname  }}"
+      folder: "{{ item.v_owning_blue_folder_path }}"
+      datacenter: "{{ item.v_owning_datacenter }}"
+      cluster: "{{ item.ems_cluster_name }}"
+      resource_pool: "Resources"
+      validate_certs: false
+      name: "{{ item.name }}"
+      is_template: False
+      state: present
+    loop: "{{ vms_and_templates }}"
+    delegate_to: localhost
+    loop_control:
+      label: "{{ item.name }}"
+
+  - name: Power On
+    vmware_guest:
+      hostname: "{{ item.ext_management_system.hostname  }}"
+      folder: "{{ item.v_owning_blue_folder_path }}"
+      datacenter: "{{ item.v_owning_datacenter }}"
+      cluster: "{{ item.ems_cluster_name }}"
+      resource_pool: "Resources" 
+      validate_certs: false
+      name: "{{ item.name }}"
+      state: poweredon
+      wait_for_ip_address: yes
+    loop: "{{ vms_and_templates }}"
+    delegate_to: localhost
+    loop_control:
+      label: "{{ item.name }}"
+
+  - name: Get VM Guest Facts
+    vmware_guest_facts:
+      hostname: "{{ item.ext_management_system.hostname  }}"
+      folder: "{{ item.v_owning_blue_folder_path }}"
+      datacenter: "{{ item.v_owning_datacenter }}"
+      validate_certs: false
+      name: "{{ item.name }}"
+    delegate_to: localhost
+    register: vm_guest_facts
+    until: vm_guest_facts.instance.ipv4 | ipv4('address')
+    retries: 10
+    delay: 10
+    loop: "{{ vms_and_templates }}"
+    loop_control:
+      label: "{{ item.name }}"
+
+  - name: Add host to inventory
+    add_host: 
+      name: "{{ item.instance.ipv4 }}"
+      groups: hosts_to_patch
+      ansible_port: 5986
+      ansible_connection: winrm
+      ansible_winrm_server_cert_validation: ignore      
+    loop: "{{ vm_guest_facts.results }}"
+    loop_control:
+      label: "{{ item.instance.ipv4 }}"
+
+- hosts: hosts_to_patch
+  gather_facts: false
+
+  tasks:
+  - name: "Wait for connection to VM"
+    wait_for_connection:
+      timeout: 300
+
+  - name: "Install Windows updates."
+    win_updates:
+      category_names: "{{ win_updates_category_names }}"
+      reboot: true
+      reboot_timeout: 3600
+    register: win_updates_result
+    failed_when: win_updates_result.failed is defined and win_updates_result.failed and win_updates_reboot == False
+    while: win_updates_result.found_update_count|int >= 1
+
+  - block:
+   # Attempting some error handling.
+    - name: "Reboot Windows to re-try update installation."
+      win_reboot:
+        shutdown_timeout_sec: 3600
+        reboot_timeout_sec: 3600
+      when: win_updates_result.error is defined and win_updates_result.error == "A reboot is required before more updates can be installed."
+
+      # Let it fail this time if reboot didn't work.
+    - name: "Install Windows updates again."
+      win_updates:
+        category_names: "{{ win_updates_category_names }}"
+        reboot: true
+        reboot_timeout: 3600
+      register: win_updates_result
+      when: win_updates_reboot and win_updates_result.failed is defined and win_updates_result.failed
+
+  - name: check if the Windows Update process is busy
+    win_shell: (New-Object -ComObject Microsoft.Update.Session).CreateUpdateInstaller().IsBusy
+    become: yes
+    become_user: SYSTEM
+    become_method: runas
+    ignore_errors: yes
+
+  - name: "Wait for host to come back"
+    wait_for_connection:
+      timeout: 1800    
+
+- hosts: localhost
+  gather_facts: false
+
+  tasks:
+  - name: Power off VM
+    vmware_guest:
+      hostname: "{{ item.ext_management_system.hostname  }}"
+      validate_certs: false
+      folder: "{{ item.v_owning_blue_folder_path }}"
+      name: "{{ item.name }}"
+      state: shutdownguest
+    loop: "{{ vms_and_templates }}"
+    loop_control:
+      label: "{{ item.name }}"
+
+  - name: Wait for VMs to Power Off
+    vmware_guest_facts:
+      hostname: "{{ item.ext_management_system.hostname  }}"
+      folder: "{{ item.v_owning_blue_folder_path }}"
+      datacenter: "{{ item.v_owning_datacenter }}"
+      validate_certs: false
+      name: "{{ item.name }}"
+    register: vm_guest_facts
+    until: vm_guest_facts.instance.hw_power_status == "poweredOff"
+    loop: "{{ vms_and_templates }}"
+    loop_control:
+      label: "{{ item.name }}"
+
+  - name: Convert back to Template
+    vmware_guest:
+      hostname: "{{ item.ext_management_system.hostname  }}"
+      folder: "{{ item.v_owning_blue_folder_path }}"
+      datacenter: "{{ item.v_owning_datacenter }}"
+      cluster: "{{ item.ems_cluster_name }}"
+      resource_pool: "Resources"
+      validate_certs: false
+      name: "{{ item.name }}"
+      is_template: true
+      state: present
+    loop: "{{ vms_and_templates }}"
+    loop_control:
+      label: "{{ item.name }}"
