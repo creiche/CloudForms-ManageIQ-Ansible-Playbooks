@@ -5,12 +5,12 @@
   tasks:  
   - name: Set ManageIQ API URL to get Templates with win_auto_update tag set to true.
     set_fact:
-      template_url: "{{ manageiq.api_url }}/api/templates/?expand=resources,tags&by_tag=/win_auto_update/true&attributes=ext_management_system.hostname,ems_cluster_name,v_owning_datacenter,v_owning_blue_folder_path"
+      template_url: "{{ manageiq.api_url }}/api/templates/?expand=resources,tags&by_tag=/win_auto_update/true&attributes=ext_management_system.hostname,ems_cluster_name,v_owning_datacenter,v_owning_blue_folder_path&filter[]=active=true"
     delegate_to: localhost
 
   - name: Set ManageIQ API URL to get VMs with win_auto_update tag set to true.
     set_fact:
-      vms_url: "{{ manageiq.api_url }}/api/vms/?expand=resources,tags&by_tag=/win_auto_update/true&attributes=ext_management_system.hostname,ems_cluster_name,v_owning_datacenter,v_owning_blue_folder_path"
+      vms_url: "{{ manageiq.api_url }}/api/vms/?expand=resources,tags&by_tag=/win_auto_update/true&attributes=ext_management_system.hostname,ems_cluster_name,v_owning_datacenter,v_owning_blue_folder_path&filter[]=active=true"
     delegate_to: localhost    
 
   - name: Call MIQ API for Windows Templates
