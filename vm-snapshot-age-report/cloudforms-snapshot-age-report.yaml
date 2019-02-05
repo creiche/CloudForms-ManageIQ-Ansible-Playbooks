@@ -1,0 +1,59 @@
+- hosts: localhost
+  gather_facts: true 
+  connection: local
+
+  tasks:
+  - name: Get date for 90 days ago
+    set_fact:
+      six_months_ago: "{{ '%Y-%m-%dT%T%z' | strftime((ansible_date_time.epoch|int)-(86400*90)) | urlencode() }}"
+
+  - name: Set search filter for API call
+    set_fact:
+      find_vms_with_snapshots_url: "{{ manageiq.api_url }}/api/vms?expand=resources&filter[]=snapshots.create_time%3c'{{ six_months_ago }}'&attributes=snapshots&filter[]=retired='false'"
+  - name: Call MIQ API for VMs with Snapshots older than 90 days
+    uri:
+      url: "{{ find_vms_with_snapshots_url }}"
+      method: GET
+      validate_certs: False
+      force_basic_auth: yes
+      status_code: 200
+      body_format: json
+      headers:
+        X-Auth-Token: "{{ manageiq.api_token }}"
+        Content-Type: "application/json"
+    register: vm_snapshots
+
+  - name: Get owner IDs and filter out duplicates
+    set_fact:
+      evm_owners: "{{ vm_snapshots.json | json_query('resources[*].evm_owner_id' ) | unique}}"
+
+  - name: Set filter using owner IDs
+    set_fact:
+      user_filter: "{{user_filter|default() }}&filter[]=or%20id='{{ item }}'"
+    with_items: "{{ evm_owners }}"
+
+  - name: Get Cloudforms Users
+    uri:
+      url: "{{ manageiq.api_url }}/api/users?expand=resources{{ user_filter }}"
+      method: GET
+      validate_certs: False
+      force_basic_auth: yes
+      status_code: 200
+      body_format: json
+      headers:
+        X-Auth-Token: "{{ manageiq.api_token }}"
+        Content-Type: "application/json"
+    register: cloudforms_users
+
+  - name: Email Owner
+    mail: 
+      host: "{{ mail_server }}"
+      port: 25
+      from: "{{ from_email }}"
+      to: "{{ item.email }}"
+      subject: "Alert: Snapshot Age Policy Exceeded"
+      body: "{{ lookup('template', 'templates/email-template.j2') }}"
+    delegate_to: localhost
+    with_items: "{{ cloudforms_users.json.resources }}"
+
+      

@@ -1,0 +1,24 @@
+Hello {{ item.name }},
+
+The following VMs have snapshots that are out of date.  Please delete these snapshots as soon as possible:
+
+{% for vm in ( vm_snapshots.json |  json_query("resources[?evm_owner_id == '" + item.id + "']") ) %}
+{{ vm.name }}
+{% for snapshot in vm.snapshots %}
+{% if (snapshot.create_time | to_datetime('%Y-%m-%dT%H:%M:%SZ')) < (('%Y-%m-%dT%TZ' | strftime((ansible_date_time.epoch|int)-(86400*180))| to_datetime('%Y-%m-%dT%H:%M:%SZ'))) %}
+  - {{ snapshot.name }} - {{ snapshot.create_time | to_datetime('%Y-%m-%dT%H:%M:%SZ') }}
+{% endif %}
+{% endfor %}
+
+{% endfor %}
+
+While snapshots are very useful for testing purposes, they become problematic the longer the snapshot stays around.
+
+1) When a snapshot is taken it fragments the virtual disk file which can have a detrimental effect on performance. 
+2) Older snapshots cause issues with domain membership.
+3) Security issues – By reverting to an old snapshot you are re-introducing an unpatched system to the network.
+
+Please delete any old snapshots as soon as possible. 
+
+Kind Regards, 
+Cloud Services Team
